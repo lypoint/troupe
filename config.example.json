@@ -1,0 +1,21 @@
+{
+  "name": "zcode-box",
+  "listen": ["0.0.0.0", 8765],
+  "public_url": "http://192.168.1.10:8765",
+  "token": "换成随机长串-每台机器各不相同",
+
+  "repo": "~/forWork/myproject",
+  "state_dir": "~/.troupe",
+  "ask_timeout": 240,
+  "task_timeout": 3600,
+  "file_max_mb": 100,
+  "open_pr": false,
+
+  "_driver说明": "type 可选: codex / opencode / qoder / claude / command(自定义) / mailbox(信箱) / echo(测试)。custom 示例：{\"type\":\"command\",\"ask_cmd\":[\"codex\",\"exec\",\"--sandbox\",\"read-only\"],\"task_cmd\":[\"codex\",\"exec\",\"--sandbox\",\"workspace-write\"]}",
+  "driver": { "type": "mailbox" },
+
+  "_peers说明": "url 是对方机器 gateway 的地址（局域网/Tailscale/SSH隧道均可），token 是对方的 token",
+  "peers": {
+    "codex-box": { "url": "http://192.168.1.20:8765", "token": "codex-box那台的token" }
+  }
+}

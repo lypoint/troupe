@@ -1,0 +1,12 @@
+{
+  "name": "box-a",
+  "listen": ["0.0.0.0", 18765],
+  "token": "ta",
+  "repo": "/tmp/troupe-test/repo",
+  "state_dir": "/tmp/troupe-test/state-a",
+  "driver": { "type": "echo" },
+  "peers": {
+    "b": { "url": "http://127.0.0.1:18766", "token": "tb" },
+    "c": { "url": "http://127.0.0.1:18767", "token": "tc" }
+  }
+}

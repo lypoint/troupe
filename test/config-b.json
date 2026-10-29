@@ -1,0 +1,13 @@
+{
+  "name": "box-b",
+  "listen": ["127.0.0.1", 18766],
+  "token": "tb",
+  "repo": "/tmp/troupe-test/repo",
+  "state_dir": "/tmp/troupe-test/state-b",
+  "driver": {
+    "type": "command",
+    "ask_cmd": ["python3", "-c", "import sys; print('FAKE-AGENT-ANSWER:', sys.argv[-1][:60])"],
+    "task_cmd": ["python3", "-c", "open('task-done.txt','w').write('ok'); print('FAKE-TASK-DONE')"]
+  },
+  "peers": { "a": { "url": "http://127.0.0.1:18765", "token": "ta" } }
+}
