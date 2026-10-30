@@ -313,13 +313,19 @@ def unregister_local_agent(agent_id):
         return True
     return False
 
-def touch_agent(agent_id):
+def touch_agent(agent_id, auto_enable=False):
+    """更新 agent 最近心跳时间。若 auto_enable=True（如主动调用 check_inbox 时），自动将其激活为可被发现状态。"""
     if not agent_id:
         return None
     with AGENTS_LOCK:
         ag = AGENTS.get(agent_id)
         if ag and is_agent_alive(ag):
             ag["last_seen"] = time.time()
+            if auto_enable and not ag.get("enabled", False):
+                ag["enabled"] = True
+                persist_agents()
+                record_event("AGENT", f"Agent 主动开始巡检信箱，自动激活为【可被发现】：{agent_id} ({ag.get('name')})",
+                             actor=agent_id, target=CFG["name"])
             return dict(ag)
     return None
 
@@ -359,6 +365,7 @@ def get_active_agent(agent_id):
 
 JOBS = {}
 JOBS_LOCK = threading.Lock()
+INBOX_CONDITION = threading.Condition(JOBS_LOCK)  # 用于信箱长轮询唤醒
 
 DELIVERY_STAGE_NAMES = {
     1: "① 已发出",
@@ -408,8 +415,9 @@ def compute_delivery_stage(j):
 def save_job(j):
     j["delivery_stage"] = compute_delivery_stage(j)
     j["delivery_stage_label"] = DELIVERY_STAGE_NAMES.get(j["delivery_stage"], "处理中")
-    with JOBS_LOCK:
+    with INBOX_CONDITION:
         JOBS[j["id"]] = j
+        INBOX_CONDITION.notify_all()
     persist_job(j)
 
 def persist_job(j):
@@ -1382,38 +1390,53 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(200, peers_info())
         if path == "/api/inbox":
             aid = (qp.get("agent_id") or "").strip()
-            touch_agent(aid)
-            # 严格按 agent_id 隔离：谁被提问/谁被发文件/谁收到回执，就谁收
-            pending = []
-            for j in list(JOBS.values()):
-                if j.get("status") == "pending_answer" and (not aid or j.get("to_agent_id") == aid):
-                    item = dict(j)
-                    # 注入自包含指令，即使对方无 AGENTS.md 也能引导其 Agent 作答
-                    item["action_required"] = (
-                        f"【系统行动指引】请针对上述问题查阅本地代码思考，然后调用 "
-                        f"submit_answer(question_id='{j['id']}', answer='你的回答') 回推给提问方！"
-                    )
-                    pending.append(item)
-            new_files = [
-                {
-                    "id": j["id"],
-                    "filename": j.get("filename"),
-                    "size": j.get("size"),
-                    "note": j.get("note", ""),
-                    "from_peer": j.get("from_peer", ""),
-                    "from_agent_id": j.get("from_agent_id", ""),
-                    "to_agent_id": j.get("to_agent_id", ""),
-                    "created": j.get("created", 0),
-                }
-                for j in list(JOBS.values())
-                if j.get("kind") == "file" and j.get("status") == "ready"
-                and (not aid or j.get("to_agent_id") == aid)
-            ]
-            replies = [
-                j for j in list(JOBS.values())
-                if j.get("kind") == "reply" and j.get("status") == "unread"
-                and (not aid or j.get("to_agent_id") == aid)
-            ]
+            # 只要 agent 主动调用 check_inbox 查信箱，就判定为进入巡检状态，自动激活为可被发现
+            touch_agent(aid, auto_enable=True)
+
+            try:
+                timeout_val = min(max(int(qp.get("timeout") or 0), 0), 60)
+            except (ValueError, TypeError):
+                timeout_val = 0
+
+            def _query_inbox():
+                pending = []
+                for j in list(JOBS.values()):
+                    if j.get("status") == "pending_answer" and (not aid or j.get("to_agent_id") == aid):
+                        item = dict(j)
+                        item["action_required"] = (
+                            f"【系统行动指引】请针对上述问题查阅本地代码思考，然后调用 "
+                            f"submit_answer(question_id='{j['id']}', answer='你的回答') 回推给提问方！"
+                        )
+                        pending.append(item)
+                new_files = [
+                    {
+                        "id": j["id"],
+                        "filename": j.get("filename"),
+                        "size": j.get("size"),
+                        "note": j.get("note", ""),
+                        "from_peer": j.get("from_peer", ""),
+                        "from_agent_id": j.get("from_agent_id", ""),
+                        "to_agent_id": j.get("to_agent_id", ""),
+                        "created": j.get("created", 0),
+                    }
+                    for j in list(JOBS.values())
+                    if j.get("kind") == "file" and j.get("status") == "ready"
+                    and (not aid or j.get("to_agent_id") == aid)
+                ]
+                replies = [
+                    j for j in list(JOBS.values())
+                    if j.get("kind") == "reply" and j.get("status") == "unread"
+                    and (not aid or j.get("to_agent_id") == aid)
+                ]
+                return pending, new_files, replies
+
+            # 支持长轮询挂起等待（若信箱为空且指定了 timeout，则阻塞等待新消息唤醒，避免空转）
+            pending, new_files, replies = _query_inbox()
+            if timeout_val > 0 and not pending and not new_files and not replies:
+                with INBOX_CONDITION:
+                    INBOX_CONDITION.wait(timeout=timeout_val)
+                pending, new_files, replies = _query_inbox()
+
             for r in replies:
                 r["status"] = "read"
                 r["delivered_to_sender"] = True
