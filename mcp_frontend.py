@@ -15,9 +15,18 @@ from pathlib import Path
 
 from fastmcp import FastMCP
 
+# 本机 gateway 走回环地址，绝不能经过 HTTP(S) 代理（系统代理会把 127.0.0.1 拦下返回 502）
+for _k in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+    os.environ.pop(_k, None)
+_no_proxy = os.environ.get("NO_PROXY", "")
+if "127.0.0.1" not in _no_proxy:
+    os.environ["NO_PROXY"] = (_no_proxy + "," if _no_proxy else "") + "127.0.0.1,localhost,::1"
+
 CONFIG_PATH = os.path.expanduser(os.environ.get("TROUPE_CONFIG", str(Path.home() / ".troupe" / "config.json")))
 _cfg = json.loads(Path(CONFIG_PATH).read_text())
 _host, _port = _cfg.get("listen", ["127.0.0.1", 8765])
+if _host in ("0.0.0.0", "::"):  # 通配监听地址不能作为客户端连接目标（Windows 直接 10049 报错）
+    _host = "127.0.0.1"
 BASE = os.environ.get("MESH_GATEWAY", f"http://{_host}:{_port}").rstrip("/")
 
 
