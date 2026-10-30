@@ -290,16 +290,18 @@ def set_agent_enabled(agent_id, enabled=True):
     """设置指定 agent 的启用状态。启用后才能对外公开暴露被其他机器发现。"""
     if not agent_id:
         return None
+    updated = None
     with AGENTS_LOCK:
         ag = AGENTS.get(agent_id)
         if ag:
             ag["enabled"] = bool(enabled)
             ag["last_seen"] = time.time()
-            persist_agents()
-            status_text = "已启用（可被发现）" if enabled else "已停用（隐身）"
-            record_event("AGENT", f"Agent 状态变更：{agent_id} -> {status_text}", actor=agent_id, target=CFG["name"])
-            return dict(ag)
-    return None
+            updated = dict(ag)
+    if updated:  # 持锁外持久化：persist_agents 内部会再次申请 AGENTS_LOCK（非重入锁），锁内调用会自死锁
+        persist_agents()
+        status_text = "已启用（可被发现）" if enabled else "已停用（隐身）"
+        record_event("AGENT", f"Agent 状态变更：{agent_id} -> {status_text}", actor=agent_id, target=CFG["name"])
+    return updated
 
 def unregister_local_agent(agent_id):
     """主动注销指定 agent（如 MCP 会话进程退出或会话关闭）。"""
