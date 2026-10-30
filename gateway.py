@@ -1348,10 +1348,16 @@ class Handler(BaseHTTPRequestHandler):
             aid = (qp.get("agent_id") or "").strip()
             touch_agent(aid)
             # 严格按 agent_id 隔离：谁被提问/谁被发文件/谁收到回执，就谁收
-            pending = [
-                j for j in list(JOBS.values())
-                if j.get("status") == "pending_answer" and (not aid or j.get("to_agent_id") == aid)
-            ]
+            pending = []
+            for j in list(JOBS.values()):
+                if j.get("status") == "pending_answer" and (not aid or j.get("to_agent_id") == aid):
+                    item = dict(j)
+                    # 注入自包含指令，即使对方无 AGENTS.md 也能引导其 Agent 作答
+                    item["action_required"] = (
+                        f"【系统行动指引】请针对上述问题查阅本地代码思考，然后调用 "
+                        f"submit_answer(question_id='{j['id']}', answer='你的回答') 回推给提问方！"
+                    )
+                    pending.append(item)
             new_files = [
                 {
                     "id": j["id"],

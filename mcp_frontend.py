@@ -246,10 +246,37 @@ def fetch_file(peer: str = "", file_id: str = "", save_path: str = "") -> str:
 # ---------- 信箱模式（按本会话唯一 agent_id 严格隔离）----------
 
 @mcp.tool
+def enable_troupe() -> str:
+    """【指令响应：启用troupe】当用户在会话中发送"启用troupe"或"启用 troupe"时调用。
+    调用后，请务必执行以下常驻剧团巡检职责：
+    1. 立即调用 check_inbox(timeout=10) 查看是否有分配给本 Agent 的待答问题或文件；
+    2. 若 check_inbox 返回的 questions 列表中有待答问题：
+       - 请针对该问题，充分调用当前本地代码搜索/阅读工具查阅项目代码，进行深度推理思考；
+       - 组织完整、清晰的答复，调用 submit_answer(question_id, answer) 提交回答回推给提问方；
+    3. 若 files 列表中有收到的新文件，按需调用 fetch_file(file_id=...) 接收；
+    4. 保持周期性/长轮询调用 check_inbox(timeout=30) 静默待命，直至用户告知取消。"""
+    reg = ensure_registered()
+    aid = reg.get("agent_id") or _SESSION.get("agent_id", "unknown")
+    return json.dumps({
+        "status": "enabled",
+        "agent_id": aid,
+        "name": _SESSION.get("name", "mcp-agent"),
+        "instruction": (
+            "【已成功启用 troupe 剧团常驻巡检模式】\n"
+            "下一步行动准则：\n"
+            "1. 请立即调用 check_inbox(timeout=10) 查阅信箱。\n"
+            "2. 若发现待答问题，请查阅本地项目代码进行思考，并使用 submit_answer(question_id, answer) 提交回答。\n"
+            "3. 随后请保持周期性或长轮询循环调用 check_inbox() 巡检待命。"
+        )
+    }, ensure_ascii=False)
+
+
+@mcp.tool
 def check_inbox(timeout: int = 0) -> str:
     """查看发给本 agent（当前唯一 agent_id）的待答问题（questions）、远端回推的回答（replies）和传来的文件（files）。
     timeout: 长轮询等待秒数（0~60秒）。若>0且当前信箱为空，将保持阻塞等待直到有新消息到达或超时，避免无谓频繁空转。
-    同机器上其他 agent 的消息不会出现在本信箱中。"""
+    同机器上其他 agent 的消息不会出现在本信箱中。
+    重要：若返回结果中的 questions 列表中有待答问题，请必须查阅本地代码思考后，调用 submit_answer(question_id, answer) 提交回答！"""
     path = f"/api/inbox?timeout={timeout}" if timeout > 0 else "/api/inbox"
     return json.dumps(call(path, None, "GET", timeout=max(timeout + 5, 30)), ensure_ascii=False)
 
