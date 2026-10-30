@@ -5,5 +5,7 @@
   "repo": "/tmp/troupe-test/repo",
   "state_dir": "/tmp/troupe-test/state-c",
   "driver": { "type": "mailbox" },
-  "peers": {}
+  "peers": {
+    "a": { "url": "http://127.0.0.1:18765", "token": "ta" }
+  }
 }

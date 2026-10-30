@@ -3,17 +3,38 @@
 troupe MCP 前端 —— 把跨机协作能力以 MCP 工具暴露给本机任意 agent
 （zcode / codex / opencode / qoder / claude… 都支持 MCP 客户端，所以都能用）。
 
+多 Agent 机制：
+  1. 每个挂载 MCP 的 agent 启动本前端进程时，会自动向本机唯一 gateway 注册并生成唯一 agent_id。
+  2. 后续所有会话请求均自动携带本会话的 from_agent_id，严格实现「谁发的就谁收」。
+  3. 首个发消息者必须：(1) 调 list_peers() 选择目标 gateway；(2) 调 list_agents(peer) 选择该 gateway 下的目标 agent_id；
+     (3) 携带 peer 与 agent_id 发送消息/任务/文件。
+
 依赖 fastmcp。启动方式（由各 agent 的 MCP 配置拉起）：
   uv run --no-project --with fastmcp python mcp_frontend.py
-环境变量 TROUPE_CONFIG 指向 gateway 的 config.json（默认 ~/.troupe/config.json）。
+环境变量：
+  TROUPE_CONFIG      指向 gateway 的 config.json（默认 ~/.troupe/config.json）
+  TROUPE_AGENT_NAME  可选，指定本 agent 会话的易读名称（默认取当前工作目录名）
+  TROUPE_AGENT_ROLE  可选，指定本 agent 会话的角色说明
 """
 import json
 import os
-import urllib.request
 import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
-from fastmcp import FastMCP
+try:
+    from fastmcp import FastMCP
+except ImportError:
+    class FastMCP:  # 兼容未装 fastmcp 的纯标准库测试环境直接导入工具函数
+        def __init__(self, name):
+            self.name = name
+
+        def tool(self, fn):
+            return fn
+
+        def run(self):
+            raise RuntimeError("请使用 uv run --no-project --with fastmcp python mcp_frontend.py 启动")
 
 # 本机 gateway 走回环地址，绝不能经过 HTTP(S) 代理（系统代理会把 127.0.0.1 拦下返回 502）
 for _k in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
@@ -29,8 +50,18 @@ if _host in ("0.0.0.0", "::"):  # 通配监听地址不能作为客户端连接�
     _host = "127.0.0.1"
 BASE = os.environ.get("MESH_GATEWAY", f"http://{_host}:{_port}").rstrip("/")
 
+# 本 MCP 会话绑定的唯一身份状态
+_SESSION = {
+    "agent_id": os.environ.get("TROUPE_AGENT_ID", "").strip(),
+    "name": os.environ.get("TROUPE_AGENT_NAME", "").strip() or (Path.cwd().name or "mcp-agent"),
+    "role": os.environ.get("TROUPE_AGENT_ROLE", "").strip() or "MCP 协作会话 Agent",
+    "cwd": str(Path.cwd()),
+    "pid": os.getpid(),
+    "registered": False,
+}
 
-def call(path, payload=None, method="POST", timeout=900):
+
+def _raw_http(path, payload=None, method="POST", timeout=900):
     req = urllib.request.Request(BASE + path, method=method)
     if _cfg.get("token"):
         req.add_header("Authorization", "Bearer " + _cfg["token"])
@@ -47,87 +78,184 @@ def call(path, payload=None, method="POST", timeout=900):
         return {"error": f"连不上本机 gateway（{BASE}）：{e}。请确认 gateway.py 在运行。"}
 
 
+def ensure_registered(name="", role="") -> dict:
+    """确保当前 MCP 会话已在本机 gateway 注册并拿到唯一 agent_id。"""
+    if name:
+        _SESSION["name"] = name.strip()
+    if role:
+        _SESSION["role"] = role.strip()
+    if _SESSION["registered"] and _SESSION["agent_id"] and not name and not role:
+        return _SESSION
+    res = _raw_http("/api/agents/register", {
+        "agent_id": _SESSION["agent_id"],
+        "name": _SESSION["name"],
+        "role": _SESSION["role"],
+        "cwd": _SESSION["cwd"],
+        "pid": _SESSION["pid"],
+        "mode": "mailbox",
+    }, "POST", timeout=10)
+    ag = (res or {}).get("agent")
+    if isinstance(ag, dict) and ag.get("agent_id"):
+        _SESSION["agent_id"] = ag["agent_id"]
+        _SESSION["name"] = ag.get("name", _SESSION["name"])
+        _SESSION["role"] = ag.get("role", _SESSION["role"])
+        _SESSION["registered"] = True
+    return res if "error" in (res or {}) else _SESSION
+
+
+def call(path, payload=None, method="POST", timeout=900):
+    reg = ensure_registered()
+    if "error" in reg and not _SESSION["agent_id"]:
+        return reg
+    aid = _SESSION["agent_id"]
+    if method == "GET":
+        sep = "&" if "?" in path else "?"
+        path = f"{path}{sep}agent_id={urllib.parse.quote(aid)}"
+    elif isinstance(payload, dict):
+        payload = dict(payload)
+        payload.setdefault("from_agent_id", aid)
+        payload.setdefault("agent_id", aid)
+    return _raw_http(path, payload, method, timeout)
+
+
+# 模块加载时尝试自动注册（若本机 gateway 尚未启动，后续首次调用工具时会自动补注册）
+ensure_registered()
+
 mcp = FastMCP("troupe")
 
 
 @mcp.tool
+def whoami() -> str:
+    """查看当前 agent 在本机 gateway 上注册的唯一 agent_id、名称与角色信息。"""
+    reg = ensure_registered()
+    if "error" in reg:
+        return json.dumps(reg, ensure_ascii=False)
+    return json.dumps({
+        "gateway": _cfg.get("name"),
+        "agent_id": _SESSION["agent_id"],
+        "name": _SESSION["name"],
+        "role": _SESSION["role"],
+        "cwd": _SESSION["cwd"],
+        "pid": _SESSION["pid"],
+    }, ensure_ascii=False)
+
+
+@mcp.tool
+def register_agent(name: str, role: str = "") -> str:
+    """更新当前 agent 在本机 gateway 上的显示名称（name）和职责说明（role），保持同一唯一 agent_id。"""
+    reg = ensure_registered(name=name, role=role)
+    if "error" in reg:
+        return json.dumps(reg, ensure_ascii=False)
+    return whoami()
+
+
+@mcp.tool
 def list_peers() -> str:
-    """列出 troupe 中其他机器/agent 及其能力（agent card）。开始跨机协作前先调用这个。"""
+    """【第 1 步：选择 Gateway】列出 troupe 中其他机器的 gateway 及其可达状态。
+    选定目标 peer 后，必须再调用 list_agents(peer) 选择该 gateway 下的具体 agent_id，才能发消息。"""
     return json.dumps(call("/api/out/peers", {}), ensure_ascii=False)
 
 
 @mcp.tool
-def ask_peer(peer: str, question: str, context: str = "") -> str:
-    """向 peer 机器上的 agent 提问并等待回答（对方只读代码库，不改文件）。
-    问题必须自包含：对方看不到你的会话上下文，请把相关文件路径、报错信息、约束条件写全。
-    若返回 status=pending（对方是信箱模式），用 task_status(peer, job_id) 轮询取答案。"""
-    return json.dumps(call("/api/out/ask", {"peer": peer, "question": question, "context": context}),
-                      ensure_ascii=False)
+def list_agents(peer: str = "") -> str:
+    """【第 2 步：从 Gateway 中选择 Agent】列出目标 peer 网关上当前注册在线的所有 agent（含唯一 agent_id、name、mode、skills）。
+    peer 留空或填 'self' 可查看本机 gateway 上的所有在线 agent。"""
+    return json.dumps(call("/api/out/agents", {"peer": peer}), ensure_ascii=False)
 
 
 @mcp.tool
-def run_task(peer: str, title: str, prompt: str, base_branch: str = "") -> str:
-    """把重活派发给 peer 机器的 agent：它在独立 git worktree 分支上执行，不动它自己的工作区。
-    prompt 要自包含且足够详细（相当于一份小型任务说明）。返回 job_id，用 task_status 轮询。"""
-    return json.dumps(call("/api/out/task", {"peer": peer, "title": title,
-                                             "prompt": prompt, "base": base_branch}),
-                      ensure_ascii=False)
+def ask_peer(peer: str, agent_id: str, question: str, context: str = "") -> str:
+    """【第 3 步：向指定 Gateway 的指定 Agent 提问】
+    必须先通过 list_peers() 选择 peer（网关），再通过 list_agents(peer) 选择目标 agent_id。
+    请求自动附带本会话唯一 from_agent_id，回答仅归属本 agent 接收。
+    问题必须自包含：对方看不到你的会话上下文，请把相关文件路径、报错信息、约束条件写全。"""
+    return json.dumps(call("/api/out/ask", {
+        "peer": peer,
+        "to_agent_id": agent_id,
+        "question": question,
+        "context": context,
+    }), ensure_ascii=False)
+
+
+@mcp.tool
+def run_task(peer: str, agent_id: str, title: str, prompt: str, base_branch: str = "") -> str:
+    """把重活派发给 peer 网关上的指定 agent_id（需选择 mode='driver' 的目标 agent）：
+    它在独立 git worktree 分支上执行，不动它自己的工作区。
+    返回 job_id，仅发起任务的本 agent 可通过 task_status(peer, job_id) 或 check_inbox() 获取结果。"""
+    return json.dumps(call("/api/out/task", {
+        "peer": peer,
+        "to_agent_id": agent_id,
+        "title": title,
+        "prompt": prompt,
+        "base": base_branch,
+    }), ensure_ascii=False)
 
 
 @mcp.tool
 def task_status(peer: str, job_id: str) -> str:
-    """查询发给 peer 的任务/提问的进度与结果（status: running/done/error/pending_answer）。"""
+    """查询本 agent 发给 peer 的任务/提问的进度与结果（status: running/done/error/pending_answer）。
+    严格校验会话归属：只能查询本 agent 自己发出的 job_id。"""
     return json.dumps(call("/api/out/status", {"peer": peer, "job_id": job_id}), ensure_ascii=False)
 
 
 @mcp.tool
-def review_pr(peer: str, pr_number: int, focus: str = "") -> str:
-    """请 peer 机器的 agent 审查某个 GitHub PR，返回审查意见文本（它不会发言论、不改代码）。"""
-    return json.dumps(call("/api/out/review", {"peer": peer, "pr": pr_number, "focus": focus}),
-                      ensure_ascii=False)
+def review_pr(peer: str, agent_id: str, pr_number: int, focus: str = "") -> str:
+    """请 peer 网关上的指定 agent_id 审查某个 GitHub PR，返回审查意见文本（它不会发言论、不改代码）。"""
+    return json.dumps(call("/api/out/review", {
+        "peer": peer,
+        "to_agent_id": agent_id,
+        "pr": pr_number,
+        "focus": focus,
+    }), ensure_ascii=False)
 
 
-# ---------- 跨机传文件（不依赖 driver，信箱机器也能收发）----------
+# ---------- 跨机传文件（按 agent_id 精准投递，谁发的/发给谁的就谁收）----------
 
 @mcp.tool
-def send_file(peer: str, path: str, note: str = "") -> str:
-    """把本机文件发给 peer 机器（存到对方网关，等对方收取）。path 是本机文件路径（绝对路径，或相对本机 repo 的路径）。
-    note 用一句话说明这是什么文件。默认单文件上限 100MB。"""
-    return json.dumps(call("/api/out/file/send", {"peer": peer, "path": path, "note": note},
-                           timeout=1800), ensure_ascii=False)
+def send_file(peer: str, agent_id: str, path: str, note: str = "") -> str:
+    """把本机文件发给 peer 网关上的指定 agent_id（存到对方网关，仅该目标 agent_id 可收取）。
+    path 是本机文件路径（绝对路径，或相对本机 repo 的路径）。默认单文件上限 100MB。"""
+    return json.dumps(call("/api/out/file/send", {
+        "peer": peer,
+        "to_agent_id": agent_id,
+        "path": path,
+        "note": note,
+    }, timeout=1800), ensure_ascii=False)
 
 
 @mcp.tool
 def list_files(peer: str) -> str:
-    """列出 peer 机器上网关代收、等待本机收取的文件（file_id、文件名、大小、说明）。"""
+    """列出 peer 机器上网关代收、与本 agent 相关的待收取文件（file_id、文件名、大小、说明）。"""
     return json.dumps(call("/api/out/files", {"peer": peer}), ensure_ascii=False)
 
 
 @mcp.tool
 def fetch_file(peer: str = "", file_id: str = "", save_path: str = "") -> str:
-    """取文件到本机。两种用法：peer 填对方机器名 = 从对方网关拉文件；
-    peer 留空 = 收取别人发到本机的文件（check_inbox / list_files 里看到的 file_id）。
-    save_path 为落盘路径：空=存到本机项目目录用原文件名；以 / 结尾或指向已有目录=存到该目录；同名自动加序号。"""
+    """取文件到本机（校验本 agent 归属权限）。两种用法：
+    peer 填对方机器名 = 从对方网关拉文件；
+    peer 留空 = 收取别人发到本机、且指定给本 agent_id 的文件（check_inbox 里看到的 file_id）。"""
     if peer:
-        return json.dumps(call("/api/out/file/get", {"peer": peer, "file_id": file_id,
-                                                     "save_path": save_path}, timeout=1800),
-                          ensure_ascii=False)
-    return json.dumps(call(f"/api/file/{file_id}/collect", {"save_path": save_path}),
-                      ensure_ascii=False)
+        return json.dumps(call("/api/out/file/get", {
+            "peer": peer,
+            "file_id": file_id,
+            "save_path": save_path,
+        }, timeout=1800), ensure_ascii=False)
+    return json.dumps(call(f"/api/file/{file_id}/collect", {"save_path": save_path}), ensure_ascii=False)
 
 
-# ---------- 信箱模式（本机 agent 是 GUI-only、无法被 CLI 驱动时，如 zcode 桌面版）----------
+# ---------- 信箱模式（按本会话唯一 agent_id 严格隔离）----------
 
 @mcp.tool
 def check_inbox() -> str:
-    """查看其他 agent 发来的、正在等待本机回答的问题和传来的文件（信箱模式）。建议经常调用；
-    传来的文件记下 file_id，用 fetch_file(file_id=...)（peer 留空）收取。"""
+    """查看发给本 agent（当前唯一 agent_id）的待答问题（questions）、远端回推的回答（replies）和传来的文件（files）。
+    同机器上其他 agent 的消息不会出现在本信箱中。"""
     return json.dumps(call("/api/inbox", None, "GET"), ensure_ascii=False)
 
 
 @mcp.tool
 def submit_answer(question_id: str, answer: str) -> str:
-    """回答信箱里的问题（先 check_inbox 拿到 question_id，作答后远端即可收到）。"""
+    """回答发给本 agent 信箱里的问题（先 check_inbox 拿到 question_id，作答后会自动回推给原发送方 agent）。
+    仅该问题的目标接收 agent_id 本人可提交回答。"""
     return json.dumps(call(f"/api/jobs/{question_id}/answer", {"answer": answer}), ensure_ascii=False)
 
 

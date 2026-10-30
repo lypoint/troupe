@@ -11,10 +11,11 @@
   "file_max_mb": 100,
   "open_pr": false,
 
-  "_driver说明": "type 可选: codex / opencode / qoder / claude / command(自定义) / mailbox(信箱) / echo(测试)。custom 示例：{\"type\":\"command\",\"ask_cmd\":[\"codex\",\"exec\",\"--sandbox\",\"read-only\"],\"task_cmd\":[\"codex\",\"exec\",\"--sandbox\",\"workspace-write\"]}",
+  "_多Agent说明": "每台机器只跑唯一一个 gateway.py。每个挂载了 mcp_frontend.py 的 agent 会话启动时都会自动向本机 gateway 注册并生成唯一 agent_id。若下方 driver.type 配置为非 mailbox（如 codex/claude/opencode/qoder/command），gateway 还会额外注册一个内置的命令行 driver agent（可接 run_task）。",
+  "_driver说明": "type 可选: codex / opencode / qoder / claude / command(自定义) / mailbox(纯MCP会话信箱) / echo(测试)。custom 示例：{\"type\":\"command\",\"ask_cmd\":[\"codex\",\"exec\",\"--sandbox\",\"read-only\"],\"task_cmd\":[\"codex\",\"exec\",\"--sandbox\",\"workspace-write\"]}",
   "driver": { "type": "mailbox" },
 
-  "_peers说明": "url 是对方机器 gateway 的地址（局域网/Tailscale/SSH隧道均可），token 是对方的 token",
+  "_peers说明": "url 是对方机器唯一 gateway 的地址（局域网/Tailscale/SSH隧道均可），token 是对方的 token",
   "peers": {
     "codex-box": { "url": "http://192.168.1.20:8765", "token": "codex-box那台的token" }
   }
