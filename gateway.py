@@ -155,6 +155,22 @@ def new_agent_id(name):
 def pid_alive(pid):
     if not pid or not isinstance(pid, int) or pid <= 0:
         return True
+    # Windows 的 os.kill(pid, 0) 不可用于存活探测：对存在的进程一律抛
+    # OSError EINVAL（winerror 87），不存在的进程则可能静默成功，结果完全不可信。
+    # 这里改用 Win32 API：OpenProcess + GetExitCodeProcess，STILL_ACTIVE(259) 视为存活。
+    if sys.platform == "win32":
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        handle = k32.OpenProcess(0x1F0FFF, False, int(pid))  # PROCESS_ALL_ACCESS
+        if not handle:
+            return False
+        try:
+            code = ctypes.c_ulong()
+            if not k32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return False
+            return code.value == 259  # STILL_ACTIVE
+        finally:
+            k32.CloseHandle(handle)
     try:
         os.kill(pid, 0)
         return True
