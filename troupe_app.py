@@ -9,7 +9,6 @@ troupe 原生可视化应用 (troupe_app.py) —— 无需 WebUI，纯 Python �
 - 【运行过程可视化】：本机唯一 Gateway 与多挂载 Agent 实时状态卡片（PID、心跳、模式）、远端 Peer 网关与远端 Agent 拓扑树、Git Worktree 沙箱监控与分类着色实时事件流
 - 【消息投递状态可视化】：端到端 5 阶段可视化流转图（①已发出 ➔ ②目标入箱/执行中 ➔ ③已作答/完成 ➔ ④已回推原发送方 ➔ ⑤原发送方已收阅）、逐跳时间戳轨迹、完整报文查看及应用内直接作答
 """
-import curses
 import os
 import sys
 import threading
@@ -747,6 +746,13 @@ tell application "System Events" to set frontmost of every process whose unix id
 # =====================================================================
 
 def run_curses_app(gw):
+    # Windows 的 CPython 标准库没有 _curses 扩展，需安装 windows-curses 才能启用 TUI
+    try:
+        import curses
+    except ImportError:
+        sys.stderr.write("[troupe] 当前环境缺少 curses（Windows 可 `pip install windows-curses`），TUI 不可用\n")
+        raise SystemExit(1)
+
     state = {"tab": 1, "selected_idx": 0}
 
     def _loop(stdscr):
