@@ -646,11 +646,43 @@ def ip_to_int(s):
 def int_to_ip(n):
     return f"{n >> 24 & 255}.{n >> 16 & 255}.{n >> 8 & 255}.{n & 255}"
 
+def parse_ipconfig_windows(out):
+    """解析 Windows ipconfig 输出（中文/英文均可），提取带 IPv4+子网掩码的接口。"""
+    iface, ip = "", ""
+    out2 = []
+    for line in out.splitlines():
+        line = line.strip()
+        if line.endswith(":") and ("适配器" in line or "adapter" in line.lower()):
+            iface, ip = line.rstrip(":").strip(), ""
+            continue
+        if "IPv4" in line:
+            m = re.search(r"(\d+\.\d+\.\d+\.\d+)", line)
+            if m:
+                ip = m.group(1)
+            continue
+        if ip and ("子网掩码" in line or "Subnet Mask" in line):
+            m = re.search(r"(\d+\.\d+\.\d+\.\d+)", line)
+            if m:
+                out2.append((iface, ip, ip_to_int(m.group(1))))
+                ip = ""
+    return out2
+
 def local_subnets():
-    """本机所有局域网接口 → [(接口名, IPv4, 掩码int)]，macOS(ifconfig) / Linux(ip) 通吃。"""
+    """本机所有局域网接口 → [(接口名, IPv4, 掩码int)]，Windows(ipconfig) / macOS(ifconfig) / Linux(ip) 通吃。"""
     out = []
     try:
-        if sys.platform == "darwin":
+        if sys.platform == "win32":
+            p = subprocess.run(["ipconfig"], capture_output=True, timeout=5)
+            raw = p.stdout or b""
+            text = None
+            for enc in ("gbk", "utf-8", "cp437"):
+                try:
+                    text = raw.decode(enc)
+                    break
+                except UnicodeDecodeError:
+                    continue
+            out = parse_ipconfig_windows(text if text is not None else raw.decode("utf-8", "replace"))
+        elif sys.platform == "darwin":
             p = subprocess.run(["ifconfig"], capture_output=True, text=True, timeout=5)
             iface = ""
             for line in p.stdout.splitlines():
