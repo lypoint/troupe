@@ -300,6 +300,21 @@ def enable_troupe() -> str:
 
 
 @mcp.tool
+def disable_troupe() -> str:
+    """【指令响应：停用troupe】当用户在会话中发送"停用troupe"、"停止巡检"、"关闭troupe"时调用。
+    调用后，将当前 Agent 在网关中恢复为隐身状态（不可被其他机器发现），并停止巡检。"""
+    reg = ensure_registered()
+    aid = reg.get("agent_id") or _SESSION.get("agent_id", "unknown")
+    _raw_http("/api/agents/enable", {"agent_id": aid, "enabled": False}, "POST", timeout=5)
+    return json.dumps({
+        "status": "disabled",
+        "agent_id": aid,
+        "name": _SESSION.get("name", "mcp-agent"),
+        "message": "【已成功停用 troupe 剧团巡检】本 Agent 已恢复为隐身状态，其他主机将不再可见。"
+    }, ensure_ascii=False)
+
+
+@mcp.tool
 def check_inbox(timeout: int = 0) -> str:
     """查看发给本 agent（当前唯一 agent_id）的待答问题（questions）、远端回推的回答（replies）和传来的文件（files）。
     timeout: 长轮询等待秒数（0~60秒）。若>0且当前信箱为空，将保持阻塞等待直到有新消息到达或超时，避免无谓频繁空转。

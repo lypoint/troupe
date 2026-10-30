@@ -331,12 +331,21 @@ def touch_agent(agent_id, auto_enable=False):
 
 def list_local_agents(include_disabled=False):
     """返回当前网关所有存活的 Agent 列表。默认仅返回已启用的 Agent（可被其他机器发现）。
-    并自动清理已退出的本地 MCP 进程。"""
+    并自动清理已退出的本地 MCP 进程。
+    注意：若 Agent 超过 INBOX_POLL_TIMEOUT 秒未巡检信箱，自动判定为停止巡检并恢复隐身状态。"""
     alive_list = []
     dead_ids = []
+    now = time.time()
+    INBOX_POLL_TIMEOUT = 180  # 3 分钟内无 check_inbox 巡检心跳，自动隐身
     with AGENTS_LOCK:
         for aid, ag in list(AGENTS.items()):
             if is_agent_alive(ag):
+                # 自动超时隐身：若长时间未巡检，判定为停止巡检
+                if ag.get("enabled", False) and (now - ag.get("last_seen", 0) > INBOX_POLL_TIMEOUT):
+                    ag["enabled"] = False
+                    record_event("AGENT", f"Agent 超过 {INBOX_POLL_TIMEOUT}s 未巡检信箱，自动停止巡检并恢复【隐身】：{aid}",
+                                 actor=aid, target=CFG["name"])
+
                 # 只有 enabled 为 True 时才对外可见/可被发现
                 if include_disabled or ag.get("enabled", False):
                     info = dict(ag)
