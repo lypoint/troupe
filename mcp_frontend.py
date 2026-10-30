@@ -18,6 +18,9 @@ troupe MCP 前端 —— 把跨机协作能力以 MCP 工具暴露给本机任�
 """
 import json
 import os
+import atexit
+import signal
+import sys
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -79,7 +82,7 @@ def _raw_http(path, payload=None, method="POST", timeout=900):
 
 
 def ensure_registered(name="", role="") -> dict:
-    """确保当前 MCP 会话已在本机 gateway 注册并拿到唯一 agent_id。"""
+    """确保当前 MCP 会话已在本机 gateway 注册并拿到唯一 agent_id。默认 enabled=False，只有调用 enable_troupe 后才对外可见。"""
     if name:
         _SESSION["name"] = name.strip()
     if role:
@@ -93,6 +96,7 @@ def ensure_registered(name="", role="") -> dict:
         "cwd": _SESSION["cwd"],
         "pid": _SESSION["pid"],
         "mode": "mailbox",
+        "enabled": False,  # 默认不启用，对外部主机隐藏
     }, "POST", timeout=10)
     ag = (res or {}).get("agent")
     if isinstance(ag, dict) and ag.get("agent_id"):
@@ -101,6 +105,28 @@ def ensure_registered(name="", role="") -> dict:
         _SESSION["role"] = ag.get("role", _SESSION["role"])
         _SESSION["registered"] = True
     return res if "error" in (res or {}) else _SESSION
+
+
+def _cleanup_session():
+    """进程退出或会话终止时，主动向网关注销当前 agent，立即对外部主机结束发现。"""
+    aid = _SESSION.get("agent_id")
+    if aid and _SESSION.get("registered"):
+        try:
+            _raw_http("/api/agents/unregister", {"agent_id": aid}, "POST", timeout=2)
+        except Exception:
+            pass
+
+atexit.register(_cleanup_session)
+
+def _sig_handler(signum, frame):
+    _cleanup_session()
+    sys.exit(0)
+
+try:
+    signal.signal(signal.SIGTERM, _sig_handler)
+    signal.signal(signal.SIGINT, _sig_handler)
+except Exception:
+    pass
 
 
 def call(path, payload=None, method="POST", timeout=900):
@@ -248,7 +274,7 @@ def fetch_file(peer: str = "", file_id: str = "", save_path: str = "") -> str:
 @mcp.tool
 def enable_troupe() -> str:
     """【指令响应：启用troupe】当用户在会话中发送"启用troupe"或"启用 troupe"时调用。
-    调用后，请务必执行以下常驻剧团巡检职责：
+    调用后，将在网关中正式激活本 Agent 为对外公开可发现状态，并进入常驻剧团巡检：
     1. 立即调用 check_inbox(timeout=10) 查看是否有分配给本 Agent 的待答问题或文件；
     2. 若 check_inbox 返回的 questions 列表中有待答问题：
        - 请针对该问题，充分调用当前本地代码搜索/阅读工具查阅项目代码，进行深度推理思考；
@@ -257,12 +283,14 @@ def enable_troupe() -> str:
     4. 保持周期性/长轮询调用 check_inbox(timeout=30) 静默待命，直至用户告知取消。"""
     reg = ensure_registered()
     aid = reg.get("agent_id") or _SESSION.get("agent_id", "unknown")
+    # 向网关汇报：激活本 agent 为对外可见状态
+    _raw_http("/api/agents/enable", {"agent_id": aid, "enabled": True}, "POST", timeout=5)
     return json.dumps({
         "status": "enabled",
         "agent_id": aid,
         "name": _SESSION.get("name", "mcp-agent"),
         "instruction": (
-            "【已成功启用 troupe 剧团常驻巡检模式】\n"
+            "【已成功启用 troupe 剧团常驻巡检模式（已对其他主机公开可发现）】\n"
             "下一步行动准则：\n"
             "1. 请立即调用 check_inbox(timeout=10) 查阅信箱。\n"
             "2. 若发现待答问题，请查阅本地项目代码进行思考，并使用 submit_answer(question_id, answer) 提交回答。\n"

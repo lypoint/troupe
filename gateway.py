@@ -193,7 +193,8 @@ def persist_agents():
     (d / "agents.json").write_text(json.dumps(data, ensure_ascii=False, indent=2))
 
 def ensure_builtin_driver_agent():
-    """若本机配置了非 mailbox 的 CLI/echo driver，则自动注册一个内置 driver agent。"""
+    """若本机配置了非 mailbox 的 CLI/echo driver，则注册一个内置 driver agent。
+    注意：默认 enabled=False，只有在该 driver 会话中显式启用 troupe 才会对外广播发现。"""
     dtype = DRIVER.get("type", "command")
     if dtype == "mailbox":
         return
@@ -203,18 +204,20 @@ def ensure_builtin_driver_agent():
         if dtype != "echo":
             skills.append("task")
     with AGENTS_LOCK:
-        AGENTS[aid] = {
-            "agent_id": aid,
-            "name": f"{CFG['name']}-{dtype}",
-            "role": f"内置 {dtype} 驱动 Agent",
-            "mode": "driver",
-            "driver_type": dtype,
-            "cwd": CFG["repo"],
-            "pid": None,
-            "skills": skills,
-            "registered_at": time.time(),
-            "last_seen": time.time(),
-        }
+        if aid not in AGENTS:
+            AGENTS[aid] = {
+                "agent_id": aid,
+                "name": f"{CFG['name']}-{dtype}",
+                "role": f"内置 {dtype} 驱动 Agent",
+                "mode": "driver",
+                "driver_type": dtype,
+                "cwd": CFG["repo"],
+                "pid": None,
+                "skills": skills,
+                "registered_at": time.time(),
+                "last_seen": time.time(),
+                "enabled": False,  # CLI 模式默认未启用，会话中启用后才可被发现
+            }
 
 def load_agents():
     update_startup_step("agents", "running", "正在恢复并校验本机已注册 Agent...")
@@ -242,7 +245,7 @@ def load_agents():
         f"在线 Agent {len(active)} 个（恢复 MCP 会话 {restored} 个，清理失效 PID {pruned} 个）"
     )
 
-def register_local_agent(name="", role="", cwd="", pid=None, agent_id="", mode="mailbox"):
+def register_local_agent(name="", role="", cwd="", pid=None, agent_id="", mode="mailbox", enabled=False):
     name = (name or "").strip() or "mcp-agent"
     cwd = os.path.expanduser((cwd or "").strip()) or CFG["repo"]
     is_new = False
@@ -256,6 +259,8 @@ def register_local_agent(name="", role="", cwd="", pid=None, agent_id="", mode="
                 "pid": pid if pid is not None else ag.get("pid"),
                 "last_seen": time.time(),
             })
+            if enabled:
+                ag["enabled"] = True
         else:
             is_new = True
             aid = agent_id.strip() if agent_id and not agent_id.startswith("ag-driver-") else new_agent_id(name)
@@ -269,16 +274,44 @@ def register_local_agent(name="", role="", cwd="", pid=None, agent_id="", mode="
                 "skills": ["ask", "review", "file"],
                 "registered_at": time.time(),
                 "last_seen": time.time(),
+                "enabled": bool(enabled),  # 核心需求：默认未启用，只有显式启用后才可被发现
             }
             AGENTS[aid] = ag
     persist_agents()
     if is_new:
-        record_event("AGENT", f"新挂载 MCP Agent 注册：{ag['agent_id']} ({ag['name']}, PID={pid})",
+        record_event("AGENT", f"新挂载 MCP Agent 注册：{ag['agent_id']} ({ag['name']}, PID={pid}, 启用状态={ag['enabled']})",
                      actor=ag["agent_id"], target=CFG["name"])
     else:
-        record_event("AGENT", f"Agent 更新/重连：{ag['agent_id']} ({ag['name']})",
+        record_event("AGENT", f"Agent 更新/重连：{ag['agent_id']} ({ag['name']}, 启用状态={ag.get('enabled')})",
                      actor=ag["agent_id"], target=CFG["name"])
     return ag
+
+def set_agent_enabled(agent_id, enabled=True):
+    """设置指定 agent 的启用状态。启用后才能对外公开暴露被其他机器发现。"""
+    if not agent_id:
+        return None
+    with AGENTS_LOCK:
+        ag = AGENTS.get(agent_id)
+        if ag:
+            ag["enabled"] = bool(enabled)
+            ag["last_seen"] = time.time()
+            persist_agents()
+            status_text = "已启用（可被发现）" if enabled else "已停用（隐身）"
+            record_event("AGENT", f"Agent 状态变更：{agent_id} -> {status_text}", actor=agent_id, target=CFG["name"])
+            return dict(ag)
+    return None
+
+def unregister_local_agent(agent_id):
+    """主动注销指定 agent（如 MCP 会话进程退出或会话关闭）。"""
+    if not agent_id:
+        return False
+    with AGENTS_LOCK:
+        ag = AGENTS.pop(agent_id, None)
+    if ag:
+        persist_agents()
+        record_event("AGENT", f"会话已关闭，注销 Agent：{agent_id} ({ag.get('name')})", actor=agent_id, target=CFG["name"])
+        return True
+    return False
 
 def touch_agent(agent_id):
     if not agent_id:
@@ -290,16 +323,19 @@ def touch_agent(agent_id):
             return dict(ag)
     return None
 
-def list_local_agents():
-    """返回当前网关所有存活的 Agent 列表，并自动清理已退出的本地 MCP 进程。"""
+def list_local_agents(include_disabled=False):
+    """返回当前网关所有存活的 Agent 列表。默认仅返回已启用的 Agent（可被其他机器发现）。
+    并自动清理已退出的本地 MCP 进程。"""
     alive_list = []
     dead_ids = []
     with AGENTS_LOCK:
         for aid, ag in list(AGENTS.items()):
             if is_agent_alive(ag):
-                info = dict(ag)
-                info["alive"] = True
-                alive_list.append(info)
+                # 只有 enabled 为 True 时才对外可见/可被发现
+                if include_disabled or ag.get("enabled", False):
+                    info = dict(ag)
+                    info["alive"] = True
+                    alive_list.append(info)
             else:
                 dead_ids.append(aid)
         for aid in dead_ids:
@@ -1487,8 +1523,22 @@ class Handler(BaseHTTPRequestHandler):
                 pid=body.get("pid"),
                 agent_id=body.get("agent_id", ""),
                 mode=body.get("mode", "mailbox"),
+                enabled=body.get("enabled", False),
             )
             return self.send_json(200, {"gateway": CFG["name"], "agent": ag})
+
+        if path == "/api/agents/enable":
+            aid = body.get("agent_id", "").strip()
+            enabled = bool(body.get("enabled", True))
+            ag = set_agent_enabled(aid, enabled)
+            if not ag:
+                return self.send_json(404, {"error": f"Agent {aid} 不存在"})
+            return self.send_json(200, {"ok": True, "agent": ag})
+
+        if path == "/api/agents/unregister":
+            aid = body.get("agent_id", "").strip()
+            ok = unregister_local_agent(aid)
+            return self.send_json(200, {"ok": ok, "agent_id": aid})
 
         # ---- 入站：由 peer 网关调用，在本机目标 agent 上执行 ----
         if path == "/api/ask":

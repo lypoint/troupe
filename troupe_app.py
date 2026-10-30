@@ -326,14 +326,15 @@ tell application "System Events" to set frontmost of every process whose unix id
              font=("Helvetica", 13, "bold")).pack(anchor="w", pady=(0, 6))
 
     local_ag_tree = ttk.Treeview(
-        left_topo, columns=("agent_id", "name", "mode", "pid", "last_seen"), show="headings", height=7
+        left_topo, columns=("agent_id", "name", "mode", "pid", "status", "last_seen"), show="headings", height=7
     )
     for col, txt, w in (
-        ("agent_id", "唯一 Agent ID", 170),
-        ("name", "名称", 110),
-        ("mode", "模式", 75),
-        ("pid", "进程 PID", 75),
-        ("last_seen", "最近心跳", 85),
+        ("agent_id", "唯一 Agent ID", 160),
+        ("name", "名称", 100),
+        ("mode", "模式", 70),
+        ("pid", "进程 PID", 70),
+        ("status", "剧团发现状态", 100),
+        ("last_seen", "最近心跳", 80),
     ):
         local_ag_tree.heading(col, text=txt)
         local_ag_tree.column(col, width=w, anchor="w" if col in ("agent_id", "name") else "center")
@@ -655,13 +656,16 @@ tell application "System Events" to set frontmost of every process whose unix id
             t_str = time.strftime("%H:%M:%S", time.localtime(s["time"])) if s.get("time") else "--:--:--"
             step_tree.insert("", "end", values=(s["title"], s["status"].upper(), t_str, s.get("detail", "")))
 
-        # 2. 刷新本机 Agents
+        # 2. 刷新本机 Agents（包含所有挂载的 agent，直观展示其是否已启用被发现）
+        all_local_agents = gw.list_local_agents(include_disabled=True)
         local_ag_tree.delete(*local_ag_tree.get_children())
-        for a in local_agents:
+        for a in all_local_agents:
             ls = f"{int(time.time() - a.get('last_seen', time.time()))}s 前"
+            is_en = a.get("enabled", False)
+            st_text = "已启用(可发现) ✓" if is_en else "未启用(隐身)"
             local_ag_tree.insert("", "end", values=(
                 a["agent_id"], a.get("name", ""), a.get("mode", ""),
-                a.get("pid") or "常驻", ls
+                a.get("pid") or "常驻", st_text, ls
             ))
 
         # 刷新远端拓扑树
