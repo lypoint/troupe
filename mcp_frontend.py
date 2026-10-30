@@ -246,10 +246,12 @@ def fetch_file(peer: str = "", file_id: str = "", save_path: str = "") -> str:
 # ---------- 信箱模式（按本会话唯一 agent_id 严格隔离）----------
 
 @mcp.tool
-def check_inbox() -> str:
+def check_inbox(timeout: int = 0) -> str:
     """查看发给本 agent（当前唯一 agent_id）的待答问题（questions）、远端回推的回答（replies）和传来的文件（files）。
+    timeout: 长轮询等待秒数（0~60秒）。若>0且当前信箱为空，将保持阻塞等待直到有新消息到达或超时，避免无谓频繁空转。
     同机器上其他 agent 的消息不会出现在本信箱中。"""
-    return json.dumps(call("/api/inbox", None, "GET"), ensure_ascii=False)
+    path = f"/api/inbox?timeout={timeout}" if timeout > 0 else "/api/inbox"
+    return json.dumps(call(path, None, "GET", timeout=max(timeout + 5, 30)), ensure_ascii=False)
 
 
 @mcp.tool

@@ -77,4 +77,5 @@ env = { TROUPE_CONFIG = "/你的路径/config.json", TROUPE_AGENT_NAME = "codex-
 - `task_status(peer, job_id)`：轮询由本 agent 自己发出的任务/提问结果（其他 agent 无权查询）。
 - `review_pr(peer, agent_id, pr_number, focus)`：请对方指定 `agent_id` 审查 GitHub PR。
 - `send_file(peer, agent_id, path, note)` / `list_files(peer)` / `fetch_file(peer, file_id, save_path)`：按 `agent_id` 精准收发文件，仅目标 `agent_id` 可在信箱中看到并收取。
-- `check_inbox()` / `submit_answer(question_id, answer)`：查看专属于当前 `agent_id` 的待答问题（`questions`）、远端回推的回答（`replies`）及收到的文件（`files`），并针对发给自己的问题作答。
+- `check_inbox(timeout=0)` / `submit_answer(question_id, answer)`：查看专属于当前 `agent_id` 的待答问题（`questions`）、远端回推的回答（`replies`）及收到的文件（`files`），并针对发给自己的问题作答。支持 `timeout` 长轮询等待，信箱为空时自动阻塞挂起直至新消息到达。
+- **主动常驻指令【启用troupe】**：在任何支持 MCP 的 IDE（Antigravity、Cursor、ZCode 等）会话中发送 `启用troupe`，Agent 将按照 `AGENTS.md` 规则进入常驻巡检模式：定时/长轮询信箱，遇到发给自己的问题自动借助当前 IDE 的代码搜索与理解能力作答并提交。
